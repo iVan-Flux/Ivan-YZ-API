@@ -2,9 +2,9 @@ name: Auto Generator and Secure Sync
 
 on:
   schedule:
-    - cron: '0 */3 * * *' # প্রতি ৩ ঘন্টা পর অটো রান হবে
-  workflow_dispatch:      # গিটহাব থেকে ম্যানুয়ালি রান করার অপশন
-  repository_dispatch:    # ক্রন-জব বা বাহ্যিক API ট্রিগার
+    - cron: '0 */3 * * *' # Runs automatically every 3 hours
+  workflow_dispatch:      # Option to run manually from GitHub Actions tab
+  repository_dispatch:    # Option to trigger externally (via API)
     types: [trigger-fetch]
 
 jobs:
@@ -21,24 +21,23 @@ jobs:
           python-version: '3.10'
           cache: 'pip'
 
-      - name: Install Pycryptodome & Requests
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Decryptor & Encryptor Engine
+      - name: Run Decryptor Engine
         env:
-          PLAYZ_BASE: ${{ secrets.PLAYZ_BASE }}
-          AES_SECRET: ${{ secrets.AES_SECRET }}
+          IVANZ_BASE: ${{ secrets.IVANZ_BASE }}
           EVENTS_PATH: ${{ secrets.EVENTS_PATH }}
           CATEGORIES_PATH: ${{ secrets.CATEGORIES_PATH }}
           SPORTS_PATH: ${{ secrets.SPORTS_PATH }}
-          PLAYZ_ALPHA: ${{ secrets.PLAYZ_ALPHA }}
-          PLAYZ_MAPPED: ${{ secrets.PLAYZ_MAPPED }}
+          IVANZ_ALPHA: ${{ secrets.IVANZ_ALPHA }}
+          IVANZ_MAPPED: ${{ secrets.IVANZ_MAPPED }}
           DECRYPTION_KEYS: ${{ secrets.DECRYPTION_KEYS }}
         run: python main.py
 
-      # আপনার Repo 2 (Private) ক্লোন করা হচ্ছে একটি সাবডিরেক্টরিতে
+      # Checkout your private Repo 2 into a subdirectory
       - name: Checkout Repo 2 (Private)
         uses: actions/checkout@v4
         with:
@@ -47,14 +46,14 @@ jobs:
           path: private-repo
           persist-credentials: true
 
-      # নতুন তৈরি হওয়া ফাইল ৩টি প্রাইভেট ফোল্ডারে কপি করা হচ্ছে
+      # Copying the generated plain JSON files into the private repo folder
       - name: Sync Outputs to Repo 2
         run: |
           cp live-events.json private-repo/
           cp categories.json private-repo/
           cp sports.json private-repo/
 
-      # প্রাইভেট রিপোজিটরিতে ফাইল পুশ করা (যা ভার্সেল অটো-ডেপ্লয়মেন্ট ট্রিগার করবে)
+      # Commit and push to private repository (triggers Vercel deployment automatically)
       - name: Commit and Push to Private Repo
         run: |
           cd private-repo
@@ -64,7 +63,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No data changes detected. Skipping push."
           else
-            git commit -m "System Synced - Encrypted Payloads Updated [skip ci]"
+            git commit -m "System Synced - Plain JSON Payloads Updated [skip ci]"
             git push
-          
           fi
