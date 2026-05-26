@@ -38,7 +38,7 @@ def custom_substitute_ivanz(data):
     for char in data:
         idx = IVANZ_MAPPED.find(char)
         if idx != -1:
-            result.append(IVANZ_ALPHA[idx])
+            result.append(PLAYZ_ALPHA[idx] if 'PLAYZ_ALPHA' in globals() else IVANZ_ALPHA[idx])
         else:
             result.append(char)
     return "".join(result)
@@ -190,50 +190,64 @@ def decrypt_ivanz_data(raw_data, embed=True):
         print(f"JSON Parse Error: {e}")
         return None
 
-def adjust_datetime(date_str, time_str, shift_minutes):
-    if not shift_minutes:
-        return {"date": date_str, "time": time_str}
+def parse_datetime_to_object(date_str, time_str):
+    """
+    Standardizes parsing of separate date and time strings 
+    into a Python datetime object safely.
+    """
+    if not time_str:
+        return None
         
-    d = None
-    if time_str and 'T' in time_str:
-        date_to_parse = time_str
-        if 'Z' not in time_str and '+' not in time_str:
-            date_to_parse += 'Z'
+    if not date_str:
+        date_str = datetime.now().strftime("%d/%m/%Y")
+        
+    date_str = date_str.replace('-', '/')
+    
+    # Clean time format to guarantee HH:MM:SS structure
+    time_parts = time_str.strip().split(':')
+    if len(time_parts) == 2:
+        time_str_cleaned = f"{time_parts[0]}:{time_parts[1]}:00"
+    elif len(time_parts) == 3:
+        time_str_cleaned = f"{time_parts[0]}:{time_parts[1]}:{time_parts[2]}"
+    else:
+        time_str_cleaned = "00:00:00"
+
+    for fmt in ("%d/%m/%Y", "%Y/%m/%d"):
         try:
-            date_to_parse = date_to_parse.replace('Z', '+0000')
-            d = datetime.strptime(date_to_parse, "%Y-%m-%dT%H:%M:%S%z")
+            combined_str = f"{date_str} {time_str_cleaned}"
+            return datetime.strptime(combined_str, f"{fmt} %H:%M:%S")
         except ValueError:
             pass
-    elif date_str and time_str:
-        parts = date_str.split('/') if '/' in date_str else date_str.split('-')
-        if len(parts) == 3 and len(parts[0]) <= 2:
-            try:
-                d = datetime.strptime(f"{parts[2]}-{parts[1]}-{parts[0]}T{time_str}+0000", "%Y-%m-%dT%H:%M:%S%z")
-            except ValueError:
-                pass
-        else:
-            try:
-                d = datetime.strptime(f"{date_str}T{time_str}+0000", "%Y-%m-%dT%H:%M:%S%z")
-            except ValueError:
-                pass
-    elif time_str:
-        parts = time_str.strip().split(':')
-        h = int(parts[0])
-        m = int(parts[1]) if len(parts) > 1 else 0
-        s = int(parts[2]) if len(parts) > 2 else 0
-        total_mins = h * 60 + m + shift_minutes
-        total_mins = ((total_mins % 1440) + 1440) % 1440
-        new_h = total_mins // 60
-        new_m = total_mins % 60
-        return {"date": date_str, "time": f"{new_h:02d}:{new_m:02d}:{s:02d}"}
+    return None
 
-    if d:
-        d = d + timedelta(minutes=shift_minutes)
-        return {"date": d.strftime("%d/%m/%Y"), "time": d.strftime("%H:%M:%S")}
+def estimate_duration_by_category(category, event_name):
+    """
+    Returns estimated game duration in minutes based on sports categories.
+    """
+    cat_lower = str(category).lower()
+    name_lower = str(event_name).lower()
 
-    return {"date": date_str, "time": time_str}
+    if "football" in cat_lower or "football" in name_lower or "soccer" in cat_lower:
+        return 150  # 2.5 hours
 
-def format_events_data(events_array, event_cats={}, shift_minutes=0):
+    if "cricket" in cat_lower or "cricket" in name_lower:
+        if "t20" in name_lower or "t-20" in name_lower or "ipl" in name_lower or "t20" in cat_lower:
+            return 240  # 4 hours
+        if "odi" in name_lower or "odi" in cat_lower or "50 over" in name_lower:
+            return 480  # 8 hours
+        if "test" in name_lower or "test" in cat_lower:
+            return 480  # 8 hours (standard test day limit)
+        return 240  # fallback standard cricket match
+
+    if "tennis" in cat_lower or "tennis" in name_lower:
+        return 180  # 3 hours
+
+    if "kabaddi" in cat_lower or "kabadi" in cat_lower or "kabaddi" in name_lower:
+        return 60   # 1 hour
+
+    return 120  # default fallback duration is 2 hours
+
+def format_events_data(events_array, event_cats={}, shift_minutes=240):
     if not isinstance(events_array, list):
         return events_array
 
@@ -254,16 +268,28 @@ def format_events_data(events_array, event_cats={}, shift_minutes=0):
         raw_end_time = event_obj.get('endTime', event_obj.get('matchEndTime', event_obj.get('end_time', '')))
         raw_date = event_obj.get('date', '')
         raw_end_date = event_obj.get('endDate', event_obj.get('date', ''))
+        
+        category = event_obj.get('category', '')
+        event_name = event_obj.get('eventName', event_obj.get('match_name', event_obj.get('title', 'Live Event')))
 
-        start_adj = adjust_datetime(raw_date, raw_time, shift_minutes)
-        end_adj = adjust_datetime(raw_end_date, raw_end_time, shift_minutes)
+        # Parse start and end datetimes
+        start_dt = parse_datetime_to_object(raw_date, raw_time)
+        end_dt = parse_datetime_to_object(raw_end_date, raw_end_time)
 
-        m_date_str = start_adj.get('date', '')
-        m_time_str = start_adj.get('time', '')
-        m_end_date_str = end_adj.get('date', '')
-        m_end_time_str = end_adj.get('time', '')
+        # Apply default timezone adjustments
+        if start_dt:
+            start_dt = start_dt + timedelta(minutes=shift_minutes)
+            
+        if end_dt:
+            end_dt = end_dt + timedelta(minutes=shift_minutes)
+        elif start_dt:
+            # Auto-calculate end_dt if missing in raw data based on category rules
+            duration = estimate_duration_by_category(category, event_name)
+            end_dt = start_dt + timedelta(minutes=duration)
 
-        start_time_combined = f"{m_date_str} {m_time_str}".strip() if m_date_str and m_time_str else (m_time_str or "")
+        # Standardizing output formats
+        start_time_output = start_dt.strftime("%d/%m/%Y %H:%M:%S") if start_dt else ""
+        end_time_output = end_dt.strftime("%d/%m/%Y %H:%M:%S") if end_dt else ""
 
         final_links = event_obj.get('links', event_obj.get('Multiple URL', []))
         if not isinstance(final_links, list):
@@ -271,19 +297,16 @@ def format_events_data(events_array, event_cats={}, shift_minutes=0):
 
         formatted.append({
             "match_id": str(event_obj.get('id', event_obj.get('match_id', ''))),
-            "category": event_obj.get('category', ''),
-            "eventName": event_obj.get('eventName', event_obj.get('match_name', event_obj.get('title', 'Live Event'))),
-            "event_name": event_obj.get('eventName', event_obj.get('match_name', event_obj.get('title', 'Live Event'))),
-            "eventLogo": event_obj.get('eventLogo', event_obj.get('logo', event_obj.get('image', event_cats.get(event_obj.get('category', ''), '')))),
+            "category": category,
+            "eventName": event_name,
+            "event_name": event_name,
+            "eventLogo": event_obj.get('eventLogo', event_obj.get('logo', event_obj.get('image', event_cats.get(category, '')))),
             "teamAName": event_obj.get('teamAName', event_obj.get('team1Name', 'Team A')),
             "teamBName": event_obj.get('teamBName', event_obj.get('team2Name', 'Team B')),
             "teamAFlag": event_obj.get('teamAFlag', event_obj.get('team1Logo', '')),
             "teamBFlag": event_obj.get('teamBFlag', event_obj.get('team2Logo', '')),
-            "startTime": start_time_combined,
-            "time": m_time_str,
-            "date": m_date_str,
-            "endTime": m_end_time_str,
-            "endDate": m_end_date_str,
+            "start Time": start_time_output,
+            "end Time": end_time_output,
             "visible": event_obj.get('visible', True),
             "isHot": event_obj.get('isHot', False),
             "links": final_links,
