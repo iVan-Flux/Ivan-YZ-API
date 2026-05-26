@@ -9,20 +9,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
-# গিটহাব সিক্রেটস থেকে কনফিগারেশন এবং সিক্রেট ভ্যালুগুলো লোড করা হচ্ছে
-PLAYZ_BASE = os.getenv("PLAYZ_BASE")
-AES_SECRET = os.getenv("AES_SECRET")
-
-# ডাইনামিক সোর্স ফাইল পাথ
+# Load configurations and secrets from environment variables
+IVANZ_BASE = os.getenv("IVANZ_BASE")
 EVENTS_PATH = os.getenv("EVENTS_PATH", "events.txt")
 CATEGORIES_PATH = os.getenv("CATEGORIES_PATH", "categories.txt")
 SPORTS_PATH = os.getenv("SPORTS_PATH", "sports.txt")
+IVANZ_ALPHA = os.getenv("IVANZ_ALPHA")
+IVANZ_MAPPED = os.getenv("IVANZ_MAPPED")
 
-# ডাইনামিক ক্যারেক্টার ম্যাপ
-PLAYZ_ALPHA = os.getenv("PLAYZ_ALPHA")
-PLAYZ_MAPPED = os.getenv("PLAYZ_MAPPED")
-
-# ডাইনামিক ডিক্রিপশন কী-লিস্ট লোড
+# Initialize decryption keys dynamically from secrets
 KEYS = []
 raw_keys_env = os.getenv("DECRYPTION_KEYS")
 if raw_keys_env:
@@ -34,16 +29,16 @@ if raw_keys_env:
                 "iv": item["iv"].encode('utf-8')
             })
     except Exception as e:
-        print(f"Error parsing DECRYPTION_KEYS JSON: {e}")
+        print(f"Error parsing DECRYPTION_KEYS: {e}")
 
-def custom_substitute_playz(data):
-    if not PLAYZ_ALPHA or not PLAYZ_MAPPED:
+def custom_substitute_ivanz(data):
+    if not IVANZ_ALPHA or not IVANZ_MAPPED:
         return data
     result = []
     for char in data:
-        idx = PLAYZ_MAPPED.find(char)
+        idx = IVANZ_MAPPED.find(char)
         if idx != -1:
-            result.append(PLAYZ_ALPHA[idx])
+            result.append(IVANZ_ALPHA[idx])
         else:
             result.append(char)
     return "".join(result)
@@ -109,13 +104,13 @@ def embed_links(data):
         return data
 
     total = min(len(lst), 40)
-    print(f"Found {len(lst)} embedded links. Processing {total}...")
+    print(f"Processing {total} embedded links...")
 
     def process_item(item):
-        url = PLAYZ_BASE + item['path']
+        url = IVANZ_BASE + item['path']
         raw_text = fetch_url(url)
         if raw_text:
-            decrypted = decrypt_playz_data(raw_text, embed=False)
+            decrypted = decrypt_ivanz_data(raw_text, embed=False)
             if decrypted:
                 return item, decrypted
             else:
@@ -162,13 +157,13 @@ def try_decrypt(data_str):
         pass
     return None
 
-def decrypt_playz_data(raw_data, embed=True):
+def decrypt_ivanz_data(raw_data, embed=True):
     if not raw_data or not isinstance(raw_data, str):
         return None
         
     decrypted_str = None
     try:
-        substituted = custom_substitute_playz(raw_data)
+        substituted = custom_substitute_ivanz(raw_data)
         decrypted_str = try_decrypt(substituted)
         if not decrypted_str:
             decrypted_str = try_decrypt(raw_data)
@@ -298,39 +293,25 @@ def format_events_data(events_array, event_cats={}, shift_minutes=0):
 
     return formatted
 
-def encrypt_data_eax(payload_bytes, secret_key):
-    """
-    Encrypts payloads securely to AES-EAX format.
-    Packed structure: Base64( nonce [16 bytes] + tag [16 bytes] + ciphertext ) inside {"data": ...}
-    """
-    key_bytes = secret_key.encode('utf-8')[:32]
-    nonce = os.urandom(16)  # Ensures explicit 16-byte secure random nonce
-    cipher = AES.new(key_bytes, AES.MODE_EAX, nonce=nonce)
-    ciphertext, tag = cipher.encrypt_and_digest(payload_bytes)
-    
-    combined_blob = nonce + tag + ciphertext
-    encoded_data = base64.b64encode(combined_blob).decode('utf-8')
-    return {"data": encoded_data}
-
 def main():
-    if not PLAYZ_BASE or not AES_SECRET:
-        print("Error: Missing required configuration variables (PLAYZ_BASE or AES_SECRET).")
+    if not IVANZ_BASE:
+        print("Error: Missing required config variable (IVANZ_BASE).")
         return
 
-    # ১. Events ডেটা প্রোসেসিং ও ডিক্রিপশন
+    # 1. Processing Events payload
     print("Decrypting Events data...")
-    events_url = PLAYZ_BASE + EVENTS_PATH
+    events_url = IVANZ_BASE + EVENTS_PATH
     raw_events = fetch_url(events_url)
     formatted_events = []
     
     if raw_events:
-        decrypted_events = decrypt_playz_data(raw_events, embed=True)
+        decrypted_events = decrypt_ivanz_data(raw_events, embed=True)
         event_cats = {}
         try:
-            cats_url = PLAYZ_BASE + "event_cats.txt"
+            cats_url = IVANZ_BASE + "event_cats.txt"
             raw_cats = fetch_url(cats_url)
             if raw_cats:
-                cats_decrypted = decrypt_playz_data(raw_cats, embed=False)
+                cats_decrypted = decrypt_ivanz_data(raw_cats, embed=False)
                 if cats_decrypted and isinstance(cats_decrypted, dict):
                     event_cats = cats_decrypted
         except Exception:
@@ -343,41 +324,35 @@ def main():
     else:
         print("Warning: Events stream could not be loaded.")
 
-    # ২. Categories ডেটা প্রোসেসিং ও ডিক্রিপশন
+    # 2. Processing Categories payload
     print("Decrypting Categories data...")
-    categories_url = PLAYZ_BASE + CATEGORIES_PATH
+    categories_url = IVANZ_BASE + CATEGORIES_PATH
     raw_categories = fetch_url(categories_url)
     decrypted_categories = []
     if raw_categories:
-        decrypted_categories = decrypt_playz_data(raw_categories, embed=False) or []
+        decrypted_categories = decrypt_ivanz_data(raw_categories, embed=False) or []
 
-    # ৩. Sports ডেটা প্রোসেসিং ও ডিক্রিপশন
+    # 3. Processing Sports payload
     print("Decrypting Sports data...")
-    sports_url = PLAYZ_BASE + SPORTS_PATH
+    sports_url = IVANZ_BASE + SPORTS_PATH
     raw_sports = fetch_url(sports_url)
     decrypted_sports = []
     if raw_sports:
-        decrypted_sports = decrypt_playz_data(raw_sports, embed=True) or []
+        decrypted_sports = decrypt_ivanz_data(raw_sports, embed=True) or []
 
-    # ৪. AES-EAX ডাইনামিক এনক্রিপশন ও লোকাল সেভিং
-    print("Saving payloads as EAX encrypted JSONs...")
+    # 4. Saving raw, unencrypted clean JSON outputs
+    print("Saving payloads as plain JSON files...")
     
-    events_bytes = json.dumps(formatted_events, sort_keys=False, ensure_ascii=False).encode('utf-8')
-    encrypted_events = encrypt_data_eax(events_bytes, AES_SECRET)
     with open("live-events.json", "w", encoding="utf-8") as f:
-        json.dump(encrypted_events, f)
+        json.dump(formatted_events, f, indent=4, ensure_ascii=False)
 
-    categories_bytes = json.dumps(decrypted_categories, sort_keys=False, ensure_ascii=False).encode('utf-8')
-    encrypted_categories = encrypt_data_eax(categories_bytes, AES_SECRET)
     with open("categories.json", "w", encoding="utf-8") as f:
-        json.dump(encrypted_categories, f)
+        json.dump(decrypted_categories, f, indent=4, ensure_ascii=False)
 
-    sports_bytes = json.dumps(decrypted_sports, sort_keys=False, ensure_ascii=False).encode('utf-8')
-    encrypted_sports = encrypt_data_eax(sports_bytes, AES_SECRET)
     with open("sports.json", "w", encoding="utf-8") as f:
-        json.dump(encrypted_sports, f)
+        json.dump(decrypted_sports, f, indent=4, ensure_ascii=False)
 
-    print("Execution Finished.")
+    print("Execution Finished Successfully.")
 
 if __name__ == "__main__":
     main()
