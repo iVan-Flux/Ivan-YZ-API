@@ -38,7 +38,7 @@ def custom_substitute_ivanz(data):
     for char in data:
         idx = IVANZ_MAPPED.find(char)
         if idx != -1:
-            result.append(PLAYZ_ALPHA[idx] if 'PLAYZ_ALPHA' in globals() else IVANZ_ALPHA[idx])
+            result.append(IVANZ_ALPHA[idx])
         else:
             result.append(char)
     return "".join(result)
@@ -191,19 +191,14 @@ def decrypt_ivanz_data(raw_data, embed=True):
         return None
 
 def parse_datetime_to_object(date_str, time_str):
-    """
-    Standardizes parsing of separate date and time strings 
-    into a Python datetime object safely.
-    """
     if not time_str:
         return None
         
     if not date_str:
-        date_str = datetime.now().strftime("%d/%m/%Y")
+        date_str = datetime.utcnow().strftime("%d/%m/%Y")
         
     date_str = date_str.replace('-', '/')
     
-    # Clean time format to guarantee HH:MM:SS structure
     time_parts = time_str.strip().split(':')
     if len(time_parts) == 2:
         time_str_cleaned = f"{time_parts[0]}:{time_parts[1]}:00"
@@ -221,9 +216,6 @@ def parse_datetime_to_object(date_str, time_str):
     return None
 
 def estimate_duration_by_category(category, event_name):
-    """
-    Returns estimated game duration in minutes based on sports categories.
-    """
     cat_lower = str(category).lower()
     name_lower = str(event_name).lower()
 
@@ -236,7 +228,7 @@ def estimate_duration_by_category(category, event_name):
         if "odi" in name_lower or "odi" in cat_lower or "50 over" in name_lower:
             return 480  # 8 hours
         if "test" in name_lower or "test" in cat_lower:
-            return 480  # 8 hours (standard test day limit)
+            return 480  # 8 hours
         return 240  # fallback standard cricket match
 
     if "tennis" in cat_lower or "tennis" in name_lower:
@@ -247,11 +239,29 @@ def estimate_duration_by_category(category, event_name):
 
     return 120  # default fallback duration is 2 hours
 
-def format_events_data(events_array, event_cats={}, shift_minutes=240):
+def replace_brand_names(obj):
+    """
+    Recursively replaces branding words like 'PLAYZ TV' or 'PLAYZ' with 'IVANZ TV' or 'IVANZ'
+    """
+    if isinstance(obj, str):
+        temp = re.sub(re.escape("PLAYZ TV"), "IVANZ TV", obj, flags=re.IGNORECASE)
+        temp = re.sub(re.escape("PLAYZ"), "IVANZ", temp, flags=re.IGNORECASE)
+        return temp
+    elif isinstance(obj, dict):
+        return {replace_brand_names(k): replace_brand_names(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [replace_brand_names(x) for x in obj]
+    return obj
+
+def format_events_data(events_array, current_ist_time, event_cats={}, shift_minutes=240):
     if not isinstance(events_array, list):
-        return events_array
+        return events_array, 0, 0, 0
 
     formatted = []
+    live_count = 0
+    upcoming_count = 0
+    finished_count = 0
+
     for item in events_array:
         if not item:
             continue
@@ -276,20 +286,34 @@ def format_events_data(events_array, event_cats={}, shift_minutes=240):
         start_dt = parse_datetime_to_object(raw_date, raw_time)
         end_dt = parse_datetime_to_object(raw_end_date, raw_end_time)
 
-        # Apply default timezone adjustments
+        # Apply timezone adjustments
         if start_dt:
             start_dt = start_dt + timedelta(minutes=shift_minutes)
             
         if end_dt:
             end_dt = end_dt + timedelta(minutes=shift_minutes)
         elif start_dt:
-            # Auto-calculate end_dt if missing in raw data based on category rules
             duration = estimate_duration_by_category(category, event_name)
             end_dt = start_dt + timedelta(minutes=duration)
 
         # Standardizing output formats
         start_time_output = start_dt.strftime("%d/%m/%Y %H:%M:%S") if start_dt else ""
         end_time_output = end_dt.strftime("%d/%m/%Y %H:%M:%S") if end_dt else ""
+
+        # Dynamic Status Logic relative to Current IST Time
+        status = "Upcoming"
+        if start_dt and end_dt:
+            if start_dt <= current_ist_time <= end_dt:
+                status = "Live"
+                live_count += 1
+            elif current_ist_time > end_dt:
+                status = "Finished"
+                finished_count += 1
+            else:
+                status = "Upcoming"
+                upcoming_count += 1
+        else:
+            upcoming_count += 1
 
         final_links = event_obj.get('links', event_obj.get('Multiple URL', []))
         if not isinstance(final_links, list):
@@ -309,23 +333,48 @@ def format_events_data(events_array, event_cats={}, shift_minutes=240):
             "end Time": end_time_output,
             "visible": event_obj.get('visible', True),
             "isHot": event_obj.get('isHot', False),
+            "Status": status,
             "links": final_links,
-            "provider_name": "OMNIX PLAY",
-            "priority": event_obj.get('priority', 0)
+            "start_dt_obj": start_dt  # Kept temporarily for sorting
         })
 
-    return formatted
+    # Sort logic: Live first, then Upcoming (sorted by start time), then Finished
+    live_events = [e for e in formatted if e["Status"] == "Live"]
+    upcoming_events = [e for e in formatted if e["Status"] == "Upcoming"]
+    finished_events = [e for e in formatted if e["Status"] == "Finished"]
+
+    # Sort upcoming events by start datetime safely
+    upcoming_events.sort(key=lambda x: x["start_dt_obj"] if x["start_dt_obj"] else datetime.max)
+    live_events.sort(key=lambda x: x["start_dt_obj"] if x["start_dt_obj"] else datetime.min)
+    finished_events.sort(key=lambda x: x["start_dt_obj"] if x["start_dt_obj"] else datetime.min, reverse=True)
+
+    sorted_events = live_events + upcoming_events + finished_events
+
+    # Clean sorting objects before final dumping
+    for ev in sorted_events:
+        if "start_dt_obj" in ev:
+            del ev["start_dt_obj"]
+
+    return sorted_events, live_count, upcoming_count, finished_count
 
 def main():
     if not IVANZ_BASE:
         print("Error: Missing required config variable (IVANZ_BASE).")
         return
 
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Calculate real-time dynamic IST (UTC + 5:30) for workflow updates
+    utc_now = datetime.utcnow()
+    ist_now = utc_now + timedelta(hours=5, minutes=30)
+    ist_formatted_string = ist_now.strftime("%I:%M:%S %p %d-%m-%Y")
+
     # 1. Processing Events payload
     print("Decrypting Events data...")
     events_url = IVANZ_BASE + EVENTS_PATH
     raw_events = fetch_url(events_url)
     formatted_events = []
+    live_c, upcoming_c, finished_c = 0, 0, 0
     
     if raw_events:
         decrypted_events = decrypt_ivanz_data(raw_events, embed=True)
@@ -341,7 +390,9 @@ def main():
             pass
 
         if isinstance(decrypted_events, list):
-            formatted_events = format_events_data(decrypted_events, event_cats, shift_minutes=240)
+            formatted_events, live_c, upcoming_c, finished_c = format_events_data(
+                decrypted_events, ist_now, event_cats, shift_minutes=240
+            )
         else:
             formatted_events = decrypted_events
     else:
@@ -363,19 +414,37 @@ def main():
     if raw_sports:
         decrypted_sports = decrypt_ivanz_data(raw_sports, embed=True) or []
 
-    # 4. Saving raw, unencrypted clean JSON outputs
-    print("Saving payloads as plain JSON files...")
-    
-    with open("live-events.json", "w", encoding="utf-8") as f:
-        json.dump(formatted_events, f, indent=4, ensure_ascii=False)
+    # Apply recursive branding replacement (PLAYZ -> IVANZ)
+    formatted_events = replace_brand_names(formatted_events)
+    decrypted_categories = replace_brand_names(decrypted_categories)
+    decrypted_sports = replace_brand_names(decrypted_sports)
 
-    with open("categories.json", "w", encoding="utf-8") as f:
+    # 4. Constructing Structured Header Response exactly as requested
+    events_final_payload = {
+        " NAME ": "FluX-YZ Live event ( Auto updated)",
+        "AUTHOR": "iVan_FluX",
+        "CONTACT (OWNER)": "https://t.me/iVan_flux",
+        "TELEGRAM CHANNEL": "https://t.me/api_hub_by_ivan",
+        "Last update time": ist_formatted_string,
+        " Live : {:02d} ".format(live_c): "",
+        "Upcoming : {:02d}".format(upcoming_c): "",
+        "Finish : {:02d} ".format(finished_c): "",
+        "events": formatted_events
+    }
+
+    # 5. Saving raw, clean unencrypted outputs
+    print("Saving plain JSON files to disk...")
+    
+    with open(os.path.join(script_dir, "live-events.json"), "w", encoding="utf-8") as f:
+        json.dump(events_final_payload, f, indent=4, ensure_ascii=False)
+
+    with open(os.path.join(script_dir, "categories.json"), "w", encoding="utf-8") as f:
         json.dump(decrypted_categories, f, indent=4, ensure_ascii=False)
 
-    with open("sports.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(script_dir, "sports.json"), "w", encoding="utf-8") as f:
         json.dump(decrypted_sports, f, indent=4, ensure_ascii=False)
 
-    print("Execution Finished Successfully.")
+    print("Success: System updated successfully.")
 
 if __name__ == "__main__":
     main()
