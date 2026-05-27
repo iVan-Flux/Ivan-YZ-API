@@ -239,6 +239,23 @@ def estimate_duration_by_category(category, event_name):
 
     return 120  # default fallback duration is 2 hours
 
+def generate_dynamic_id(team_a, team_b):
+    """
+    Generates dynamic Match ID based on: First letter of TeamA + First letter of TeamB + 'IVF'
+    """
+    char_a = "X"
+    char_b = "X"
+    
+    clean_a = re.sub(r'[^a-zA-Z0-9]', '', str(team_a))
+    clean_b = re.sub(r'[^a-zA-Z0-9]', '', str(team_b))
+    
+    if clean_a:
+        char_a = clean_a[0].upper()
+    if clean_b:
+        char_b = clean_b[0].upper()
+        
+    return f"{char_a}{char_b}IVF"
+
 def replace_brand_names(obj):
     """
     Recursively replaces branding words like 'PLAYZ TV' or 'PLAYZ' with 'IVANZ TV' or 'IVANZ'
@@ -281,6 +298,12 @@ def format_events_data(events_array, current_ist_time, event_cats={}, shift_minu
         
         category = event_obj.get('category', '')
         event_name = event_obj.get('eventName', event_obj.get('match_name', event_obj.get('title', 'Live Event')))
+        
+        team_a_name = event_obj.get('teamAName', event_obj.get('team1Name', 'Team A'))
+        team_b_name = event_obj.get('teamBName', event_obj.get('team2Name', 'Team B'))
+        team_a_flag = event_obj.get('teamAFlag', event_obj.get('team1Logo', ''))
+        team_b_flag = event_obj.get('teamBFlag', event_obj.get('team2Logo', ''))
+        event_logo = event_obj.get('eventLogo', event_obj.get('logo', event_obj.get('image', event_cats.get(category, ''))))
 
         # Parse start and end datetimes
         start_dt = parse_datetime_to_object(raw_date, raw_time)
@@ -296,9 +319,9 @@ def format_events_data(events_array, current_ist_time, event_cats={}, shift_minu
             duration = estimate_duration_by_category(category, event_name)
             end_dt = start_dt + timedelta(minutes=duration)
 
-        # Standardizing output formats
-        start_time_output = start_dt.strftime("%d/%m/%Y %H:%M:%S") if start_dt else ""
-        end_time_output = end_dt.strftime("%d/%m/%Y %H:%M:%S") if end_dt else ""
+        # Standardizing output formats for startTime and endTime inside eventInfo
+        start_time_output = start_dt.strftime("%Y/%m/%d %H:%M:%S +0000") if start_dt else ""
+        end_time_output = end_dt.strftime("%Y/%m/%d %H:%M:%S +0000") if end_dt else ""
 
         # Dynamic Status Logic relative to Current IST Time
         status = "Upcoming"
@@ -319,31 +342,54 @@ def format_events_data(events_array, current_ist_time, event_cats={}, shift_minu
         if not isinstance(final_links, list):
             final_links = []
 
-        formatted.append({
-            "match_id": str(event_obj.get('id', event_obj.get('match_id', ''))),
-            "category": category,
+        # Map channel data parameters to the new requested structure
+        channels_data = []
+        for ch in final_links:
+            if not isinstance(ch, dict):
+                continue
+            channels_data.append({
+                "api": ch.get("api", ""),
+                "link": ch.get("link", ch.get("url", "")),
+                "title": ch.get("name", "Stream"),
+                "type": "1",
+                "tokenApi": ch.get("tokenApi", "")
+            })
+
+        # Check isHot flag value
+        raw_is_hot = event_obj.get('isHot', False)
+        is_hot_str = "1" if raw_is_hot in (True, "1", 1) else "0"
+
+        # Constructing eventInfo sub-object parameters
+        event_info = {
+            "teamA": team_a_name,
+            "teamB": team_b_name,
+            "teamAFlag": team_a_flag,
+            "teamBFlag": team_b_flag,
             "eventName": event_name,
-            "event_name": event_name,
-            "eventLogo": event_obj.get('eventLogo', event_obj.get('logo', event_obj.get('image', event_cats.get(category, '')))),
-            "teamAName": event_obj.get('teamAName', event_obj.get('team1Name', 'Team A')),
-            "teamBName": event_obj.get('teamBName', event_obj.get('team2Name', 'Team B')),
-            "teamAFlag": event_obj.get('teamAFlag', event_obj.get('team1Logo', '')),
-            "teamBFlag": event_obj.get('teamBFlag', event_obj.get('team2Logo', '')),
-            "start Time": start_time_output,
-            "end Time": end_time_output,
-            "visible": event_obj.get('visible', True),
-            "isHot": event_obj.get('isHot', False),
+            "eventType": "null",
+            "eventBanner": event_obj.get('eventBanner', 'https://iili.io/CJa3rDF.png'),
+            "isHot": is_hot_str,
             "Status": status,
-            "links": final_links,
+            "startTime": start_time_output,
+            "endTime": end_time_output
+        }
+
+        # Structuring payload matching the new blueprint exactly
+        formatted.append({
+            "id": generate_dynamic_id(team_a_name, team_b_name),
+            "title": event_name,
+            "image": event_logo,
+            "cat": category,
+            "eventInfo": event_info,
+            "channels_data": channels_data,
             "start_dt_obj": start_dt  # Kept temporarily for sorting
         })
 
-    # Sort logic: Live first, then Upcoming (sorted by start time), then Finished
-    live_events = [e for e in formatted if e["Status"] == "Live"]
-    upcoming_events = [e for e in formatted if e["Status"] == "Upcoming"]
-    finished_events = [e for e in formatted if e["Status"] == "Finished"]
+    # Sort logic: Live first, then Upcoming (sorted by start time), then Finished (sorted newest first)
+    live_events = [e for e in formatted if e["eventInfo"]["Status"] == "Live"]
+    upcoming_events = [e for e in formatted if e["eventInfo"]["Status"] == "Upcoming"]
+    finished_events = [e for e in formatted if e["eventInfo"]["Status"] == "Finished"]
 
-    # Sort upcoming events by start datetime safely
     upcoming_events.sort(key=lambda x: x["start_dt_obj"] if x["start_dt_obj"] else datetime.max)
     live_events.sort(key=lambda x: x["start_dt_obj"] if x["start_dt_obj"] else datetime.min)
     finished_events.sort(key=lambda x: x["start_dt_obj"] if x["start_dt_obj"] else datetime.min, reverse=True)
