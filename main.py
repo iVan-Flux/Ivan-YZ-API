@@ -52,35 +52,71 @@ def decrypt_aes_cbc(data_bytes, key, iv):
         return None
 
 def unpack_json(data):
+    """
+    Recursively deserializes stringified JSON structures.
+    Strips leading/trailing whitespaces and newlines to resolve nested widevine/API structures safely.
+    """
     if isinstance(data, list):
         for i in range(len(data)):
             data[i] = unpack_json(data[i])
     elif isinstance(data, dict):
         for k in list(data.keys()):
             v = data[k]
-            if isinstance(v, str) and (v.startswith('{') or v.startswith('[')):
-                try:
-                    data[k] = unpack_json(json.loads(v))
-                except json.JSONDecodeError:
-                    pass
+            if isinstance(v, str):
+                v_stripped = v.strip()
+                if v_stripped.startswith('{') or v_stripped.startswith('['):
+                    try:
+                        data[k] = unpack_json(json.loads(v_stripped))
+                    except json.JSONDecodeError:
+                        pass
             else:
                 data[k] = unpack_json(v)
     return data
 
-def collect_embedded_links(data, lst=None):
+def collect_api_paths(data, lst=None):
+    """
+    [Sports Pass 1 Collector]
+    Finds encrypted string list paths under categories 'api' key.
+    """
     if lst is None:
         lst = []
     if isinstance(data, list):
-        for i in range(len(data)):
-            collect_embedded_links(data[i], lst)
+        for item in data:
+            collect_api_paths(item, lst)
     elif isinstance(data, dict):
-        if 'link_names' in data:
-            del data['link_names']
+        if "cat" in data and isinstance(data["cat"], dict):
+            cat = data["cat"]
+            if "api" in cat and isinstance(cat["api"], str) and cat["api"].endswith(".txt"):
+                lst.append({
+                    "parent": cat,
+                    "key": "api",
+                    "path": cat["api"]
+                })
         for k, v in list(data.items()):
-            if k in ('api', 'links', 'Multiple URL') and isinstance(v, str) and v.endswith('.txt'):
-                lst.append({'parent': data, 'key': k, 'path': v})
-            else:
-                collect_embedded_links(v, lst)
+            collect_api_paths(v, lst)
+    return lst
+
+def collect_channel_links(data, lst=None):
+    """
+    [Sports Pass 2 Collector]
+    Finds encrypted stream list paths inside resolved channels and clears static link_names.
+    """
+    if lst is None:
+        lst = []
+    if isinstance(data, list):
+        for item in data:
+            collect_channel_links(item, lst)
+    elif isinstance(data, dict):
+        if "link_names" in data:
+            del data["link_names"]
+        if "links" in data and isinstance(data["links"], str) and data["links"].endswith(".txt"):
+            lst.append({
+                "parent": data,
+                "key": "links",
+                "path": data["links"]
+            })
+        for k, v in list(data.items()):
+            collect_channel_links(v, lst)
     return lst
 
 def fetch_url(url, retries=3):
@@ -98,12 +134,81 @@ def fetch_url(url, retries=3):
                 print(f"Fetch failed for {url}: {e}")
                 return None
 
+def resolve_sports_payload(sports_data):
+    """
+    Double-pass execution loop to resolve full categories and stream paths inside sports payload.
+    """
+    # PASS 1: Resolve "api" paths to pull down channels inside categories
+    api_tasks = collect_api_paths(sports_data)
+    total_api = len(api_tasks)
+    print(f"Found {total_api} categories to decrypt. Resolving Pass 1...")
+    
+    def process_task(task):
+        url = IVANZ_BASE + task["path"]
+        raw_text = fetch_url(url)
+        if raw_text:
+            decrypted = decrypt_ivanz_data(raw_text, embed=False)
+            return task, decrypted
+        return task, None
+
+    if total_api > 0:
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(process_task, t) for t in api_tasks]
+            for future in as_completed(futures):
+                task, result = future.result()
+                if result:
+                    task["parent"][task["key"]] = result
+
+    # PASS 2: Resolve "links" paths inside newly decrypted channels to get stream lists
+    channel_tasks = collect_channel_links(sports_data)
+    total_channels = len(channel_tasks)
+    print(f"Found {total_channels} channels with sub-links. Resolving Pass 2 streams...")
+    
+    if total_channels > 0:
+        processed = 0
+        with ThreadPoolExecutor(max_workers=15) as executor:
+            futures = [executor.submit(process_task, t) for t in channel_tasks]
+            for future in as_completed(futures):
+                processed += 1
+                if processed % 5 == 0 or processed == total_channels:
+                    print(f"Resolved streams: {processed}/{total_channels}...")
+                task, result = future.result()
+                ch = task["parent"]
+                
+                # Set stream_links with resolved decrypted streams
+                if result:
+                    ch["stream_links"] = result
+                else:
+                    ch["stream_links"] = [{"name": "Error", "link": "Decryption failed"}]
+                    
+                # Delete the old links string path key
+                if "links" in ch:
+                    del ch["links"]
+
+    return sports_data
+
+def collect_embedded_links(data, lst=None):
+    if lst is None:
+        lst = []
+    if isinstance(data, list):
+        for i in range(len(data)):
+            collect_embedded_links(data[i], lst)
+    elif isinstance(data, dict):
+        if 'link_names' in data:
+            del data['link_names']
+        for k, v in list(data.items()):
+            if k in ('api', 'links', 'Multiple URL') and isinstance(v, str) and v.endswith('.txt'):
+                lst.append({'parent': data, 'key': k, 'path': v})
+            else:
+                collect_embedded_links(v, lst)
+    return lst
+
 def embed_links(data):
     lst = collect_embedded_links(data)
     if not lst:
         return data
 
-    total = min(len(lst), 40)
+    total = len(lst)
     print(f"Processing {total} embedded links...")
 
     def process_item(item):
@@ -119,7 +224,7 @@ def embed_links(data):
             return item, [{"name": "Error", "link": "Fetch failed"}]
 
     processed = 0
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=15) as executor:
         futures = [executor.submit(process_item, item) for item in lst]
         for future in as_completed(futures):
             processed += 1
@@ -256,18 +361,23 @@ def generate_dynamic_id(team_a, team_b):
         
     return f"{char_a}{char_b}IVF"
 
-def replace_brand_names(obj):
+def replace_brand_names(obj, key_name=None):
     """
-    Recursively replaces branding words like 'PLAYZ TV' or 'PLAYZ' with 'IVANZ TV' or 'IVANZ'
+    Recursively replaces branding words like 'PLAYZ' with 'IVANZ' ONLY in text/titles keys.
+    Keeps URLs and link pathways untouched.
     """
     if isinstance(obj, str):
-        temp = re.sub(re.escape("PLAYZ TV"), "IVANZ TV", obj, flags=re.IGNORECASE)
-        temp = re.sub(re.escape("PLAYZ"), "IVANZ", temp, flags=re.IGNORECASE)
-        return temp
+        text_keys = {'name', 'title', 'eventName', 'event_name', 'category', 'cat'}
+        is_url = obj.startswith('http://') or obj.startswith('https://') or '/' in obj or '.m3u' in obj or '.txt' in obj
+        if not is_url or (key_name in text_keys):
+            temp = re.sub(re.escape("PLAYZ TV"), "IVANZ TV", obj, flags=re.IGNORECASE)
+            temp = re.sub(re.escape("PLAYZ"), "IVANZ", temp, flags=re.IGNORECASE)
+            return temp
+        return obj
     elif isinstance(obj, dict):
-        return {replace_brand_names(k): replace_brand_names(v) for k, v in obj.items()}
+        return {k: replace_brand_names(v, key_name=k) for k, v in obj.items()}
     elif isinstance(obj, list):
-        return [replace_brand_names(x) for x in obj]
+        return [replace_brand_names(x, key_name) for x in obj]
     return obj
 
 def format_events_data(events_array, current_ist_time, event_cats={}, shift_minutes=240):
@@ -410,7 +520,7 @@ def main():
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # Calculate real-time dynamic IST (UTC + 5:30) for workflow updates
+    # Calculate real-time dynamic IST (UTC + 5:30) for metadata header
     utc_now = datetime.utcnow()
     ist_now = utc_now + timedelta(hours=5, minutes=30)
     ist_formatted_string = ist_now.strftime("%I:%M:%S %p %d-%m-%Y")
@@ -452,20 +562,24 @@ def main():
     if raw_categories:
         decrypted_categories = decrypt_ivanz_data(raw_categories, embed=False) or []
 
-    # 3. Processing Sports payload
+    # 3. Processing Sports payload with double-pass recursive resolution
     print("Decrypting Sports data...")
     sports_url = IVANZ_BASE + SPORTS_PATH
     raw_sports = fetch_url(sports_url)
     decrypted_sports = []
     if raw_sports:
-        decrypted_sports = decrypt_ivanz_data(raw_sports, embed=True) or []
+        # Decrypt first level of sports payload (categories structure)
+        sports_first_level = decrypt_ivanz_data(raw_sports, embed=False) or []
+        if sports_first_level:
+            # Resolve recursive categories and nested channels streams
+            decrypted_sports = resolve_sports_payload(sports_first_level)
 
-    # Apply recursive branding replacement (PLAYZ -> IVANZ)
+    # Apply safe recursive branding replacement (PLAYZ -> IVANZ) for titles and names only
     formatted_events = replace_brand_names(formatted_events)
     decrypted_categories = replace_brand_names(decrypted_categories)
     decrypted_sports = replace_brand_names(decrypted_sports)
 
-    # 4. Constructing Structured Header Response exactly as requested
+    # 4. Constructing Structured Header Response for events exactly as requested
     events_final_payload = {
         " NAME ": "FluX-YZ Live event ( Auto updated)",
         "AUTHOR": "iVan_FluX",
@@ -478,6 +592,16 @@ def main():
         "events": formatted_events
     }
 
+    # Constructing Structured Header Response for sports exactly as requested
+    sports_final_payload = {
+        " NAME ": "FluX-YZ Live event ( Auto updated)",
+        "AUTHOR": "iVan_Flux",
+        "CONTACT (OWNER)": "https://t.me/iVan_flux",
+        "TELEGRAM CHANNEL": "https://t.me/api_hub_by_ivan",
+        "Last update time": ist_formatted_string,
+        "sports": decrypted_sports
+    }
+
     # 5. Saving raw, clean unencrypted outputs
     print("Saving plain JSON files to disk...")
     
@@ -488,7 +612,7 @@ def main():
         json.dump(decrypted_categories, f, indent=4, ensure_ascii=False)
 
     with open(os.path.join(script_dir, "sports.json"), "w", encoding="utf-8") as f:
-        json.dump(decrypted_sports, f, indent=4, ensure_ascii=False)
+        json.dump(sports_final_payload, f, indent=4, ensure_ascii=False)
 
     print("Success: System updated successfully.")
 
